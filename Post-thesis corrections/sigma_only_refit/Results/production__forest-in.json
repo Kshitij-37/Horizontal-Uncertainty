@@ -1,0 +1,48 @@
+{
+  "config": "production__forest-in",
+  "form": "production",
+  "forest_config": "forest-in",
+  "n_pairs": 45,
+  "loo": {
+    "pearson": 0.8821557004547133,
+    "spearman": 0.6487483530961792,
+    "bias": 0.005491253411645265
+  },
+  "coeffs": {
+    "log_sigma0": -3.4661956170282173,
+    "gammas": {
+      "dist_sat": 0.3812780618743046,
+      "turning_sat": 0.31467835141739736,
+      "wm_abs_log_speedup": 0.22690395637938185,
+      "roughness_sat": 0.30781019583148433,
+      "dz_sat": 0.16979731136323914
+    },
+    "nu": 14.684696657245695
+  },
+  "feature_order": [
+    "dist_sat",
+    "turning_sat",
+    "wm_abs_log_speedup",
+    "roughness_sat",
+    "dz_sat"
+  ],
+  "feature_stds": {
+    "dist_sat": 0.19617068028058277,
+    "turning_sat": 0.1839789457731056,
+    "wm_abs_log_speedup": 0.0405641094425912,
+    "roughness_sat": 0.21074537283688846,
+    "dz_sat": 0.31805323038601974
+  },
+  "self_prediction_range_pct": {
+    "min": 0.33677362139796785,
+    "median": 0.6101327768441394,
+    "max": 1.2035040730074835
+  },
+  "feature_means": {
+    "dist_sat": 0.49930928856865137,
+    "turning_sat": 0.17775702852113287,
+    "wm_abs_log_speedup": 0.032311598821817555,
+    "roughness_sat": 0.3509629567562967,
+    "dz_sat": 0.4860266576289889
+  }
+}

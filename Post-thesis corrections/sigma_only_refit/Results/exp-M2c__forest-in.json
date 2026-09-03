@@ -1,0 +1,72 @@
+{
+  "config": "exp-M2c__forest-in",
+  "form": "exp-M2c",
+  "forest_config": "forest-in",
+  "n_pairs": 45,
+  "loo": {
+    "pearson": 0.8866806993529768,
+    "spearman": 0.6840579710144926,
+    "bias": 0.00428934951388491
+  },
+  "coeffs": {
+    "log_sigma0": -3.3760519819084394,
+    "gammas": {
+      "dist_sat": 0.3003546041122368,
+      "turning_sat": 0.28027179626416393,
+      "wm_abs_log_speedup": 0.23095408431063288,
+      "dz_sat": 0.16210745217476608,
+      "roughness_sat": 0.3378821532388098
+    },
+    "nu": 14.72631311429941
+  },
+  "feature_order": [
+    "dist_sat",
+    "turning_sat",
+    "wm_abs_log_speedup",
+    "roughness_sat",
+    "dz_sat"
+  ],
+  "feature_stds": {
+    "dist_sat": 0.19617068028058277,
+    "turning_sat": 0.1839789457731056,
+    "wm_abs_log_speedup": 0.0405641094425912,
+    "roughness_sat": 0.8347365309634392,
+    "dz_sat": 0.31805323038601974
+  },
+  "self_prediction_range_pct": {
+    "min": 0.4490863987657757,
+    "median": 0.4565249551877677,
+    "max": 0.4565249551877677
+  },
+  "feature_means": {
+    "dist_sat": 0.49930928856865137,
+    "turning_sat": 0.17775702852113287,
+    "wm_abs_log_speedup": 0.032311598821817555,
+    "roughness_sat": 0.0,
+    "dz_sat": 0.4860266576289889
+  },
+  "feature_means_all": {
+    "dist_sat": 0.49930928856865137,
+    "turning_sat": 0.17775702852113287,
+    "wm_abs_log_speedup": 0.032311598821817555,
+    "roughness_sat": 0.3509629567562967,
+    "dz_sat": 0.4860266576289889
+  },
+  "feature_stds_all": {
+    "dist_sat": 0.1983873684967343,
+    "turning_sat": 0.18605786990454012,
+    "wm_abs_log_speedup": 0.04102247551070833,
+    "roughness_sat": 0.2131267520720923,
+    "dz_sat": 0.32164716627336654
+  },
+  "expM2_details": {
+    "std_A": 0.21074537283688846,
+    "std_B": 0.21611847342720808,
+    "mean_A": 0.3509629567562967,
+    "mean_B": 0.3494031686522354,
+    "mean_raw_A": 0.005014904036912702,
+    "mean_raw_B": 0.0048548779977188785,
+    "std_raw_A": 0.004134459124012697,
+    "std_raw_B": 0.0033972750488891553
+  }
+}

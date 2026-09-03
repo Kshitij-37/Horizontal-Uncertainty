@@ -1,0 +1,15 @@
+"Malarberget: ?? = -0.262 — justified exclusion
+Kayislar: ?r = -0.691 but ?? = -0.013 — destroys Pearson but barely affects ranking (one extreme outlier pulling the linear fit)
+Taaibos 2022PA021: ?? = -0.068 — confirms what you found
+Balverwald 2024PA014: ?r = -0.435 but ?? = -0.009 — same pattern as Kayislar
+Slovenska East: ?? = +0.047 — actually helps when added back, worth reconsidering?
+Ukhanda 2023PA085: ?? = +0.042 — also helps"
+"Most fragile included masts (removing hurts):
+
+Herzhausen 2019PA023: ?? = -0.124 — the model heavily depends on this pair for ranking. It's the highest-error pair, so it anchors the top of the ranking.
+Doringbaai/Zawidz: ?? ? -0.044 each
+Pairs that drag performance (removing helps):
+
+Pelczyce 2023PA032: ?? = +0.087 — removing it improves Spearman significantly
+Courcelles-sous: ?? = +0.075
+Ukhanda: ?? = +0.063"

@@ -1,0 +1,872 @@
+"""
+WS Horizontal Uncertainty — Pair-Level Bayesian Model
+
+Trains on pair-level omnidirectional wind speed errors. Each observation is one
+directional pair (A→B); the target is the frequency-weighted signed error across
+all sectors (allowing cancellation), matching how WAsP computes overall WS.
+
+Model specification:
+  e_overall_i ~ StudentT(nu, mu_i, sigma_i)
+
+  log(sigma_i) = log_sigma0
+               + gamma_dist      * dist_sat_z
+               + gamma_turning   * turning_sat_z
+               + gamma_speedup   * wm_abs_log_speedup_z
+               + gamma_roughness * roughness_sat_z
+               + gamma_dz        * dz_sat_z
+
+  mu_i = beta_dz * dz_z
+
+Features (5 sigma + 1 mu, all pair-level):
+  1. dist_sat              — 1 - exp(-d / d_A), saturating distance
+  2. turning_sat           — 1 - exp(-wm_abs_turning / TURN_SAT_SCALE)
+  3. wm_abs_log_speedup    — Weighted mean |log(speedup_WTG / speedup_MM)|
+  4. roughness_sat         — 1 - exp(-wm_abs_roughness / ROUGH_SAT_SCALE)
+  5. dz_sat                — 1 - exp(-|dz| / 40), saturating height difference
+  mu: dz                   — Signed height difference (bias direction)
+
+Sector weights: MM Weibull frequency distribution (freq_MM).
+"""
+
+import numpy as np
+import pandas as pd
+import pymc as pm
+import arviz as az
+import matplotlib.pyplot as plt
+import multiprocessing as mp
+import json
+import os
+import contextlib
+import sys
+from scipy import stats
+from scipy.special import gamma as gamma_func
+import plotly.graph_objects as go
+
+
+# ─────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────
+INPUT_PATH = r"C:\Kshitij stuff\Horizontal Uncertainty Check\Input data\Focused_modelling_inputs.xlsx"
+
+SECTOR_LABELS = ["N", "NNE", "ENE", "E", "ESE", "SSE", "S", "SSW", "WSW", "W", "WNW", "NNW"]
+
+FEATURE_CONFIG = [
+    # (gamma_name,        raw_col,                  display_name)
+    ("gamma_dist",       "dist_sat",               "Saturating distance (1-exp(-d/dA))"),
+    ("gamma_turning",    "turning_sat",             "Saturating |turning| (1-exp(-t/s))"),
+    ("gamma_speedup",    "wm_abs_log_speedup",      "WM |log speedup ratio|"),
+    ("gamma_roughness",  "roughness_sat",           "Saturating |roughness| (1-exp(-r/s))"),
+    ("gamma_dz",         "dz_sat",                  "Saturating |dz| (1-exp(-|dz|/40))"),
+]
+
+DZ_SAT_SCALE = 40
+ROUGH_SAT_SCALE = 0.01
+TURN_SAT_SCALE = 3.0
+
+EXCLUDED_MASTS = [
+    "2015WM018", "2021PA004", "2022PA008",        # Sallachy - Hills and valleys
+    "2022PA018",                                  # Kayislar - only 2 direction dominate energy, not the idea of exemplar location for a model training data set.
+    "2011WM011", "2014WM011",                     # Hultema  - Tried fixing it as much as I can, doesnt seem to fit the model.
+    "2019HE001", "2019HE002", "2019HE003",        # Herzhausen CFD - Including just 1 CFD with WAsP is apples to oranges, so keeping it out.
+    "2022PA021",                                  # Taaibos  - 3 mast location, this mast is also well calibrated but drops the spearman by 0.07 so ignored.
+    "2023PA085",                                  # Ukhanda  - 2 mast + 1 LiDAR location, had to remove 1 mast.
+    "2024PA014",                                  # Balver Wald - Removing only 1 measurement, based on best fit to the model, but this site is quite uncertain and may need to be removed entirely.
+    "2012WM006",                                  # Malarberget -  Tried fixing it as much as I can, doesnt seem to fit the model.
+    "2024PA107",                                  # Slovenksa East - No displacement height available in data, not wanting to run last minute calculations, ignored.
+]
+
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "Results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+OUTPUT_PREFIX = os.path.join(RESULTS_DIR, "ws_uncertainty_pairlevel")
+
+
+# ─────────────────────────────────────────────────────────────────
+# HELPER
+# ─────────────────────────────────────────────────────────────────
+@contextlib.contextmanager
+def suppress_output():
+    with open(os.devnull, "w") as devnull:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+
+# ─────────────────────────────────────────────────────────────────
+# DATA PREPARATION
+# ─────────────────────────────────────────────────────────────────
+def build_pair_training_data(df: pd.DataFrame) -> dict:
+    """Aggregate sector-level data to one row per directional pair."""
+    d = df.copy()
+
+    required = [
+        "pair_id", "sector_name", "location",
+        "Mean_windspeed_predicted", "Mean_windspeed_self",
+        "d_turning_deg",
+        "overall_speedup_WTG_factor", "overall_speedup_MM_factor",
+        "weight_energy_predicted",
+        "Sample_count_pred", "Sample_count_self",
+        "distance_m", "distance_A",
+        "dz",
+    ]
+    missing = [c for c in required if c not in d.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    # Use windPRO detailed values where available
+    upgrade_map = {
+        "d_turning_deg":              "d_turning_deg_new",
+        "overall_speedup_WTG_factor": "overall_speedup_WTG_factor_new",
+        "overall_speedup_MM_factor":  "overall_speedup_MM_factor_new",
+        "rough_speedup_WTG_frac":     "rough_speedup_WTG_frac_new",
+        "rough_speedup_MM_frac":      "rough_speedup_MM_frac_new",
+    }
+    n_upgraded = 0
+    for old_col, new_col in upgrade_map.items():
+        if new_col in d.columns:
+            mask = d[new_col].notna()
+            n_rows = mask.sum()
+            if n_rows > 0:
+                d.loc[mask, old_col] = d.loc[mask, new_col]
+                n_upgraded = max(n_upgraded, n_rows)
+    if n_upgraded > 0:
+        print(f"  WindPRO detailed values: {n_upgraded}/{len(d)} rows upgraded")
+
+    # Sector-level signed error
+    d["e_sector"] = (
+        (d["Mean_windspeed_predicted"] - d["Mean_windspeed_self"]) /
+        d["Mean_windspeed_self"]
+    )
+
+    # Sector-level |log speedup ratio|
+    mask_spd = (
+        d["overall_speedup_WTG_factor"].notna() &
+        d["overall_speedup_MM_factor"].notna() &
+        (d["overall_speedup_WTG_factor"] > 0) &
+        (d["overall_speedup_MM_factor"] > 0)
+    )
+    d["abs_log_speedup_ratio"] = np.nan
+    d.loc[mask_spd, "abs_log_speedup_ratio"] = np.abs(
+        np.log(d.loc[mask_spd, "overall_speedup_WTG_factor"] /
+               d.loc[mask_spd, "overall_speedup_MM_factor"])
+    )
+
+    # ── Aggregate to pair level ──────────────────────────────────
+    pair_rows = []
+    for pair_id, grp in d.groupby("pair_id"):
+        w_energy = grp["weight_energy_predicted"].values
+        if w_energy.sum() == 0:
+            continue
+
+        # Sample count weights for computing overall WS
+        w_pred = pd.to_numeric(grp["Sample_count_pred"], errors="coerce").fillna(0).values
+        w_self = pd.to_numeric(grp["Sample_count_self"], errors="coerce").fillna(0).values
+
+        if w_pred.sum() == 0 or w_self.sum() == 0:
+            print(f"  WARNING: zero sample counts for {pair_id}, falling back to equal weights")
+            w_pred = np.ones(len(grp))
+            w_self = np.ones(len(grp))
+
+        w_pred_norm = w_pred / w_pred.sum()
+        w_self_norm = w_self / w_self.sum()
+
+        # Target: frequency-weighted overall error
+        WS_pred_overall = float(np.sum(w_pred_norm * grp["Mean_windspeed_predicted"].values))
+        WS_self_overall = float(np.sum(w_self_norm * grp["Mean_windspeed_self"].values))
+        e_overall = (WS_pred_overall - WS_self_overall) / WS_self_overall
+
+        # Feature 1: saturating distance
+        distance_m = grp["distance_m"].iloc[0]
+        distance_A = grp["distance_A"].iloc[0]
+        if pd.isna(distance_A) or distance_A <= 0:
+            print(f"  WARNING: distance_A NaN/zero for {pair_id}, skipping")
+            continue
+        dist_sat = float(1.0 - np.exp(-distance_m / distance_A))
+
+        # Sector weights: MM Weibull frequency
+        w_freq = pd.to_numeric(grp["freq_MM"], errors="coerce").fillna(0).values
+        w_freq_norm = w_freq / w_freq.sum() if w_freq.sum() > 0 else w_pred_norm
+
+        # Feature 2: weighted mean |turning| → saturated
+        abs_turn = grp["d_turning_deg"].abs().values
+        wm_abs_turning = float(np.sum(w_freq_norm * abs_turn))
+        turning_sat = float(1.0 - np.exp(-wm_abs_turning / TURN_SAT_SCALE))
+
+        # Feature 3: weighted mean |log speedup ratio|
+        abs_log_spd = grp["abs_log_speedup_ratio"].fillna(0).values
+        wm_abs_log_speedup = float(np.sum(w_freq_norm * abs_log_spd))
+
+        # Feature 4: weighted mean |roughness speedup| → saturated
+        rs_WTG = pd.to_numeric(grp["rough_speedup_WTG_frac"], errors="coerce").values \
+            if "rough_speedup_WTG_frac" in grp.columns else np.full(len(grp), np.nan)
+        rs_MM = pd.to_numeric(grp["rough_speedup_MM_frac"], errors="coerce").values \
+            if "rough_speedup_MM_frac" in grp.columns else np.full(len(grp), np.nan)
+        abs_rough = np.abs((rs_WTG + rs_MM) / 2)
+        valid_rough = ~np.isnan(abs_rough)
+        if valid_rough.sum() > 0:
+            wm_abs_roughness = float(
+                np.sum(w_freq_norm[valid_rough] * abs_rough[valid_rough]) /
+                w_freq_norm[valid_rough].sum()
+            )
+        else:
+            wm_abs_roughness = np.nan
+
+        if not np.isnan(wm_abs_roughness):
+            roughness_sat = float(1.0 - np.exp(-wm_abs_roughness / ROUGH_SAT_SCALE))
+        else:
+            roughness_sat = np.nan
+
+        # Feature 5: saturating |dz|
+        dz = float(grp["dz"].iloc[0]) if "dz" in grp.columns else np.nan
+        dz_sat = float(1.0 - np.exp(-abs(dz) / DZ_SAT_SCALE)) if not pd.isna(dz) else np.nan
+
+        pair_rows.append({
+            "pair_id":             pair_id,
+            "e_overall":           e_overall,
+            "WS_pred_overall":     WS_pred_overall,
+            "WS_self_overall":     WS_self_overall,
+            "dist_sat":            dist_sat,
+            "wm_abs_turning":      wm_abs_turning,
+            "turning_sat":         turning_sat,
+            "wm_abs_log_speedup":  wm_abs_log_speedup,
+            "wm_abs_roughness":    wm_abs_roughness,
+            "roughness_sat":       roughness_sat,
+            "dz":                  dz,
+            "dz_sat":              dz_sat,
+            "abs_dz":              abs(dz) if not pd.isna(dz) else np.nan,
+            "location":            grp["location"].iloc[0] if "location" in grp.columns else "",
+            "distance_m":          distance_m,
+        })
+
+    pair_df = pd.DataFrame(pair_rows)
+
+    # Drop pairs with NaN in any feature or target column
+    feature_cols = [raw_col for _, raw_col, _ in FEATURE_CONFIG] + ["dz", "e_overall"]
+    nan_mask = pair_df[feature_cols].isna().any(axis=1)
+    if nan_mask.any():
+        dropped = pair_df.loc[nan_mask, "pair_id"].tolist()
+        print(f"  WARNING: dropping {nan_mask.sum()} pairs with NaN features: {dropped}")
+        pair_df = pair_df[~nan_mask].copy()
+
+    print(f"  Dataset: {len(pair_df)} directional pairs")
+    print(f"  Target e_overall: mean={pair_df['e_overall'].mean()*100:.2f}%  "
+          f"std={pair_df['e_overall'].std()*100:.2f}%  "
+          f"range=[{pair_df['e_overall'].min()*100:.1f}%, {pair_df['e_overall'].max()*100:.1f}%]")
+
+    print(f"\n  {'pair_id':<35} {'WS_pred':>8} {'WS_self':>8} {'e_overall':>10}")
+    print(f"  {'-'*65}")
+    for _, row in pair_df.iterrows():
+        print(f"  {row['pair_id']:<35} {row['WS_pred_overall']:>8.3f} {row['WS_self_overall']:>8.3f} {row['e_overall']*100:>+9.2f}%")
+
+    # Standardise sigma features
+    scalers = {}
+    for _, raw_col, _ in FEATURE_CONFIG:
+        mean = pair_df[raw_col].mean()
+        std  = pair_df[raw_col].std()
+        std  = std if std > 0 else 1.0
+        pair_df[f"{raw_col}_z"] = (pair_df[raw_col] - mean) / std
+        scalers[f"{raw_col}_mean"] = mean
+        scalers[f"{raw_col}_std"]  = std
+
+    # Standardise dz (mu/bias feature — signed)
+    dz_mean = pair_df["dz"].mean()
+    dz_std  = pair_df["dz"].std()
+    dz_std  = dz_std if dz_std > 0 else 1.0
+    pair_df["dz_z"] = (pair_df["dz"] - dz_mean) / dz_std
+    scalers["dz_mean"] = dz_mean
+    scalers["dz_std"]  = dz_std
+
+    print(f"\n  Feature ranges:")
+    for _, raw_col, display in FEATURE_CONFIG:
+        print(f"    {display:<45} [{pair_df[raw_col].min():.4f}, {pair_df[raw_col].max():.4f}]")
+    print(f"    {'dz (bias term)':<45} [{pair_df['dz'].min():.1f}, {pair_df['dz'].max():.1f}] m")
+
+    result = {
+        "e":        pair_df["e_overall"].values,
+        "dz_z":     pair_df["dz_z"].values,
+        "pair_ids": pair_df["pair_id"].values,
+        "scalers":  scalers,
+        "df":       pair_df,
+    }
+    for _, raw_col, _ in FEATURE_CONFIG:
+        result[f"{raw_col}_z"] = pair_df[f"{raw_col}_z"].values
+
+    return result
+
+
+def rebuild_data_dict(pair_df: pd.DataFrame) -> dict:
+    """Rebuild data dict from a subset pair-level DataFrame (for LOO CV)."""
+    pair_df = pair_df.copy()
+
+    feature_cols = [raw_col for _, raw_col, _ in FEATURE_CONFIG] + ["dz", "e_overall"]
+    nan_mask = pair_df[feature_cols].isna().any(axis=1)
+    if nan_mask.any():
+        pair_df = pair_df[~nan_mask].copy()
+
+    scalers = {}
+    for _, raw_col, _ in FEATURE_CONFIG:
+        mean = pair_df[raw_col].mean()
+        std  = pair_df[raw_col].std()
+        std  = std if std > 0 else 1.0
+        pair_df[f"{raw_col}_z"] = (pair_df[raw_col] - mean) / std
+        scalers[f"{raw_col}_mean"] = mean
+        scalers[f"{raw_col}_std"]  = std
+
+    dz_mean = pair_df["dz"].mean()
+    dz_std  = pair_df["dz"].std()
+    dz_std  = dz_std if dz_std > 0 else 1.0
+    pair_df["dz_z"] = (pair_df["dz"] - dz_mean) / dz_std
+    scalers["dz_mean"] = dz_mean
+    scalers["dz_std"]  = dz_std
+
+    result = {
+        "e":        pair_df["e_overall"].values,
+        "dz_z":     pair_df["dz_z"].values,
+        "pair_ids": pair_df["pair_id"].values,
+        "scalers":  scalers,
+        "df":       pair_df,
+    }
+    for _, raw_col, _ in FEATURE_CONFIG:
+        result[f"{raw_col}_z"] = pair_df[f"{raw_col}_z"].values
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# MODEL
+# ─────────────────────────────────────────────────────────────────
+def fit_model(data: dict, draws=2000, tune=2000, chains=4, cores=4):
+    e = data["e"]
+    n = len(e)
+
+    print(f"\n  Pair-level Student-t model: {n} pairs")
+
+    with pm.Model() as model:
+        e_data = pm.Data("e", e)
+
+        dist_sat_z   = pm.Data("dist_sat_z",   data["dist_sat_z"])
+        turning_z    = pm.Data("turning_z",    data["turning_sat_z"])
+        speedup_z    = pm.Data("speedup_z",    data["wm_abs_log_speedup_z"])
+        roughness_z  = pm.Data("roughness_z",  data["roughness_sat_z"])
+        dz_sat_z     = pm.Data("dz_sat_z",     data["dz_sat_z"])
+        dz_z         = pm.Data("dz_z",         data["dz_z"])
+
+        # Priors
+        nu         = pm.Gamma("nu", alpha=2, beta=0.2)
+        log_sigma0 = pm.Normal("log_sigma0", mu=-3.9, sigma=0.5)
+
+        gamma_dist      = pm.HalfNormal("gamma_dist",      sigma=0.3)
+        gamma_turning   = pm.HalfNormal("gamma_turning",    sigma=0.3)
+        gamma_speedup   = pm.HalfNormal("gamma_speedup",    sigma=0.3)
+        gamma_roughness = pm.HalfNormal("gamma_roughness",  sigma=0.3)
+        gamma_dz        = pm.HalfNormal("gamma_dz",         sigma=0.3)
+
+        beta_dz = pm.Normal("beta_dz", mu=0, sigma=0.05)
+
+        log_sigma = (
+            log_sigma0
+            + gamma_dist      * dist_sat_z
+            + gamma_turning   * turning_z
+            + gamma_speedup   * speedup_z
+            + gamma_roughness * roughness_z
+            + gamma_dz        * dz_sat_z
+        )
+        sigma = pm.Deterministic("sigma", pm.math.exp(log_sigma))
+        mu = pm.Deterministic("mu", beta_dz * dz_z)
+
+        pm.StudentT("obs", nu=nu, mu=mu, sigma=sigma, observed=e_data)
+
+        print("\n  Sampling posterior...")
+        idata = pm.sample(
+            draws=draws, tune=tune,
+            target_accept=0.95,
+            chains=chains, cores=cores,
+            random_seed=42,
+        )
+
+    return model, idata, data["scalers"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# DIAGNOSTICS
+# ─────────────────────────────────────────────────────────────────
+def print_diagnostics(idata, scalers):
+    print("\n" + "=" * 70)
+    print("PAIR-LEVEL WS UNCERTAINTY MODEL — DIAGNOSTICS")
+    print("=" * 70)
+
+    var_names = ["nu", "log_sigma0", "beta_dz"] + [gn for gn, _, _ in FEATURE_CONFIG]
+    print(az.summary(idata, var_names=var_names))
+
+    nu_samples = idata.posterior["nu"].values.flatten()
+    print(f"\nDegrees of freedom: nu = {nu_samples.mean():.2f} +/- {nu_samples.std():.2f}")
+    print(f"  95% CI: [{np.percentile(nu_samples, 2.5):.2f}, {np.percentile(nu_samples, 97.5):.2f}]")
+
+    log_sigma0_s = idata.posterior["log_sigma0"].values.flatten()
+    sigma0 = np.exp(log_sigma0_s)
+    print(f"\nBaseline sigma (all z=0): {sigma0.mean():.4f} ({sigma0.mean()*100:.2f}%)")
+
+    nu_mean = nu_samples.mean()
+    if nu_mean > 2:
+        ratio = np.sqrt(nu_mean / np.pi) * gamma_func((nu_mean - 1) / 2) / gamma_func(nu_mean / 2)
+        print(f"  E[|e|] = {ratio:.3f} * sigma  (for nu={nu_mean:.1f})")
+
+    print("\n" + "=" * 70)
+    print("SIGMA DRIVER EFFECTS")
+    print("=" * 70)
+    print(f"{'Driver':<45} {'gamma mean':>10} {'Multiplier':>12}")
+    print("-" * 70)
+    for gamma_name, _, display in FEATURE_CONFIG:
+        if gamma_name not in idata.posterior:
+            continue
+        g = idata.posterior[gamma_name].values.flatten()
+        print(f"  {display:<43} {g.mean():>10.3f} {np.exp(g.mean()):>12.3f}x")
+
+    print("\n" + "=" * 70)
+    print("BIAS TERM (dz)")
+    print("=" * 70)
+    if "beta_dz" in idata.posterior:
+        b = idata.posterior["beta_dz"].values.flatten()
+        scalers_dz_std = scalers.get("dz_std", 1.0)
+        beta_per_m = b.mean() / scalers_dz_std
+        print(f"  beta_dz (standardised):  {b.mean():+.4f} +/- {b.std():.4f}")
+        print(f"  beta_dz (per metre dz):  {beta_per_m*100:+.4f}% WS bias per metre height diff")
+        print(f"  Interpretation: dz=+10m -> mu={b.mean()/scalers_dz_std*10*100:+.2f}% bias")
+
+    # Variance decomposition
+    print("\n" + "=" * 70)
+    print("VARIANCE DECOMPOSITION  (% of var[log sigma])")
+    print("=" * 70)
+    gamma_vars = {}
+    for gamma_name, _, display in FEATURE_CONFIG:
+        if gamma_name not in idata.posterior:
+            continue
+        g_mean = idata.posterior[gamma_name].values.flatten().mean()
+        gamma_vars[display] = g_mean ** 2
+
+    baseline_var = idata.posterior["log_sigma0"].values.flatten().var()
+    total_var = baseline_var + sum(gamma_vars.values())
+
+    print(f"  {'Feature':<45} {'Var contrib':>10} {'% of total':>10}")
+    print("  " + "-" * 67)
+    for display, v in sorted(gamma_vars.items(), key=lambda x: -x[1]):
+        print(f"  {display:<45} {v:>10.5f} {v / total_var * 100:>9.1f}%")
+    print("  " + "-" * 67)
+    print(f"  {'Baseline (log_sigma0 var)':<45} {baseline_var:>10.5f} {baseline_var / total_var * 100:>9.1f}%")
+    print(f"  {'TOTAL':<45} {total_var:>10.5f} {'100.0%':>10}")
+    feat_pct = sum(gamma_vars.values()) / total_var * 100
+    print(f"\n  Features explain {feat_pct:.1f}% of log(sigma) variance; "
+          f"{100 - feat_pct:.1f}% is unexplained baseline.")
+
+
+# ─────────────────────────────────────────────────────────────────
+# LOO CV
+# ─────────────────────────────────────────────────────────────────
+def leave_one_pair_out_cv(pair_df: pd.DataFrame, draws=1000, tune=1000,
+                          holdout_by: str = "pair"):
+    """
+    LOO CV with two holdout strategies:
+      "pair" — hold out both A->B and B->A of each physical pair
+      "site" — hold out ALL pairs from the same location
+    """
+    assert holdout_by in ("pair", "site"), "holdout_by must be 'pair' or 'site'"
+    pair_df = pair_df.copy()
+
+    if holdout_by == "pair":
+        pair_df["_group_key"] = pair_df["pair_id"].apply(
+            lambda x: "__".join(sorted(x.split("__")))
+        )
+        fold_label = "physical pairs"
+    else:
+        if "location" not in pair_df.columns or pair_df["location"].isna().all():
+            raise ValueError("holdout_by='site' requires a non-empty 'location' column.")
+        pair_df["_group_key"] = pair_df["location"]
+        fold_label = "sites"
+
+    fold_groups = pair_df.groupby("_group_key")["pair_id"].unique().to_dict()
+    all_folds   = list(fold_groups.keys())
+
+    print("=" * 70)
+    print(f"LEAVE-ONE-OUT CV  ({len(all_folds)} {fold_label})  "
+          f"[holdout_by='{holdout_by}']")
+    print("=" * 70)
+
+    results = []
+    for i, fold_key in enumerate(all_folds):
+        held_out_ids = fold_groups[fold_key]
+        print(f"\n[{i+1}/{len(all_folds)}] Holding out: {fold_key} "
+              f"({len(held_out_ids)} directions)")
+
+        train_df = pair_df[~pair_df["pair_id"].isin(held_out_ids)].copy()
+        test_df  = pair_df[ pair_df["pair_id"].isin(held_out_ids)].copy()
+
+        if len(train_df) < 5:
+            print("  Too few training pairs, skipping.")
+            continue
+
+        train_data = rebuild_data_dict(train_df)
+
+        try:
+            with suppress_output():
+                _, idata, _ = fit_model(train_data, draws=draws, tune=tune, chains=2, cores=2)
+        except Exception as ex:
+            print(f"  Model fitting failed: {ex}")
+            continue
+
+        log_sigma0_mean = float(idata.posterior["log_sigma0"].values.mean())
+        beta_dz_mean = float(idata.posterior["beta_dz"].values.mean()) if "beta_dz" in idata.posterior else 0.0
+        gammas = {
+            gn: float(idata.posterior[gn].values.mean())
+            for gn, _, _ in FEATURE_CONFIG
+            if gn in idata.posterior
+        }
+        train_scalers = train_data["scalers"]
+
+        def standardize(col_name, values):
+            m = train_scalers.get(f"{col_name}_mean", 0)
+            s = train_scalers.get(f"{col_name}_std",  1)
+            return (values - m) / s
+
+        for _, row in test_df.iterrows():
+            z_vals = {
+                "gamma_dist":       standardize("dist_sat",            np.array([row["dist_sat"]])),
+                "gamma_turning":    standardize("turning_sat",         np.array([row["turning_sat"]])),
+                "gamma_speedup":    standardize("wm_abs_log_speedup",  np.array([row["wm_abs_log_speedup"]])),
+                "gamma_roughness":  standardize("roughness_sat",       np.array([row["roughness_sat"]])),
+                "gamma_dz":         standardize("dz_sat",              np.array([row["dz_sat"]])),
+            }
+            log_sigma_pred = log_sigma0_mean + sum(
+                gammas[gn] * z_vals[gn][0] for gn in gammas if gn in z_vals
+            )
+            sigma_pred = float(np.exp(log_sigma_pred))
+
+            dz_z_pred = standardize("dz", np.array([row["dz"]]))[0]
+            mu_pred   = float(beta_dz_mean * dz_z_pred)
+
+            actual_error = abs(row["e_overall"])
+
+            results.append({
+                "pair_id":          row["pair_id"],
+                "predicted_sigma":  sigma_pred,
+                "predicted_mu":     mu_pred,
+                "actual_error":     actual_error,
+                "e_overall_signed": row["e_overall"],
+                "location":         row.get("location", ""),
+                "abs_dz":           row.get("abs_dz", np.nan),
+                "distance_m":       row["distance_m"],
+            })
+            print(f"  {row['pair_id']}: sigma={sigma_pred:.2%}  mu={mu_pred*100:+.2f}%  "
+                  f"actual={actual_error:.2%}  (signed={row['e_overall']*100:+.1f}%)")
+
+    results_df = pd.DataFrame(results)
+    if len(results_df) < 2:
+        print("Not enough folds completed.")
+        return results_df, np.nan, np.nan, np.nan
+
+    results_df["effective_sigma"] = np.sqrt(
+        results_df["predicted_mu"] ** 2 + results_df["predicted_sigma"] ** 2
+    )
+    results_df["additive_sigma"] = (
+        results_df["predicted_sigma"] + results_df["predicted_mu"].abs()
+    )
+
+    csv_path = f"{OUTPUT_PREFIX}_loo_{holdout_by}_results.csv"
+    results_df.to_csv(csv_path, index=False)
+    print(f"Saved: {csv_path}")
+
+    # Metrics
+    r_sigma   = results_df["predicted_sigma"].corr(results_df["actual_error"])
+    rho_sigma = results_df["predicted_sigma"].corr(results_df["actual_error"], method="spearman")
+    bias_sigma = (results_df["predicted_sigma"] - results_df["actual_error"]).mean()
+
+    r_eff     = results_df["effective_sigma"].corr(results_df["actual_error"])
+    rho_eff   = results_df["effective_sigma"].corr(results_df["actual_error"], method="spearman")
+    bias_eff  = (results_df["effective_sigma"] - results_df["actual_error"]).mean()
+
+    r_add     = results_df["additive_sigma"].corr(results_df["actual_error"])
+    rho_add   = results_df["additive_sigma"].corr(results_df["actual_error"], method="spearman")
+    bias_add  = (results_df["additive_sigma"] - results_df["actual_error"]).mean()
+
+    r_pearson, r_spearman, bias = r_sigma, rho_sigma, bias_sigma
+
+    print("\n" + "=" * 70)
+    print(f"LOO RESULTS  [{holdout_by}-level holdout]")
+    print("=" * 70)
+    print(f"  Pairs tested:              {len(results_df)}")
+    print(f"\n  -- sigma only --")
+    print(f"  Pearson r:                 {r_sigma:.3f}")
+    print(f"  Spearman rho:              {rho_sigma:.3f}")
+    print(f"  Bias:                      {bias_sigma:+.4f} ({bias_sigma*100:+.2f} pp)")
+    print(f"  Mean pred sigma:           {results_df['predicted_sigma'].mean():.2%}")
+    print(f"\n  -- effective = sqrt(mu^2 + sigma^2) --")
+    print(f"  Pearson r:                 {r_eff:.3f}")
+    print(f"  Spearman rho:              {rho_eff:.3f}")
+    print(f"  Bias:                      {bias_eff:+.4f} ({bias_eff*100:+.2f} pp)")
+    print(f"  Mean pred effective:       {results_df['effective_sigma'].mean():.2%}")
+    print(f"\n  -- additive = sigma + |mu| --")
+    print(f"  Pearson r:                 {r_add:.3f}")
+    print(f"  Spearman rho:              {rho_add:.3f}")
+    print(f"  Bias:                      {bias_add:+.4f} ({bias_add*100:+.2f} pp)")
+    print(f"  Mean pred additive:        {results_df['additive_sigma'].mean():.2%}")
+    print(f"  Mean actual |e|:           {results_df['actual_error'].mean():.2%}")
+
+    # LOO scatter plot
+    from plotly.subplots import make_subplots
+
+    hover_data = list(zip(
+        results_df["pair_id"], results_df["location"],
+        results_df["e_overall_signed"],
+        results_df["predicted_mu"],
+        results_df["predicted_sigma"],
+    ))
+    hover_tmpl = (
+        "<b>%{customdata[0]}</b><br>%{customdata[1]}<br>"
+        "Signed e: %{customdata[2]:.1%}<br>"
+        "mu_pred: %{customdata[3]:.2%}<br>"
+        "sigma_pred: %{customdata[4]:.2%}<extra></extra>"
+    )
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=(
+            f"sigma only  (r={r_sigma:.3f}, rho={rho_sigma:.3f})",
+            f"sqrt(mu^2+sigma^2)  (r={r_eff:.3f}, rho={rho_eff:.3f})",
+            f"sigma+|mu|  (r={r_add:.3f}, rho={rho_add:.3f})",
+        ),
+    )
+    marker_kw = dict(size=10, color=results_df["abs_dz"], colorscale="Viridis",
+                     opacity=0.75)
+
+    fig.add_trace(go.Scatter(
+        x=results_df["predicted_sigma"], y=results_df["actual_error"],
+        mode="markers", marker=marker_kw,
+        customdata=hover_data, hovertemplate=hover_tmpl, showlegend=False,
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=results_df["effective_sigma"], y=results_df["actual_error"],
+        mode="markers", marker=marker_kw,
+        customdata=hover_data, hovertemplate=hover_tmpl, showlegend=False,
+    ), row=1, col=2)
+
+    fig.add_trace(go.Scatter(
+        x=results_df["additive_sigma"], y=results_df["actual_error"],
+        mode="markers", marker={**marker_kw, "colorbar": dict(title="|dz| (m)", x=1.02)},
+        customdata=hover_data, hovertemplate=hover_tmpl, showlegend=False,
+    ), row=1, col=3)
+
+    max_val = max(
+        results_df["additive_sigma"].max(), results_df["actual_error"].max()
+    ) * 1.15
+    for col in [1, 2, 3]:
+        fig.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val,
+                      line=dict(color="red", dash="dash", width=2), row=1, col=col)
+
+    fig.update_xaxes(title_text="Predicted sigma", row=1, col=1)
+    fig.update_xaxes(title_text="sqrt(mu^2 + sigma^2)", row=1, col=2)
+    fig.update_xaxes(title_text="sigma + |mu|", row=1, col=3)
+    fig.update_yaxes(title_text="Actual |overall error|", row=1, col=1)
+    fig.update_layout(
+        title=f"LOO CV — Pair-Level Model  [{holdout_by}-level holdout]",
+        height=550, width=1500, template="plotly_white",
+    )
+    html_path = f"{OUTPUT_PREFIX}_loo_{holdout_by}_cv.html"
+    fig.write_html(html_path)
+    print(f"Saved: {html_path}")
+
+    return results_df, r_pearson, r_spearman, bias
+
+
+# ─────────────────────────────────────────────────────────────────
+# CALIBRATION COVERAGE
+# ─────────────────────────────────────────────────────────────────
+def calibration_coverage_test(results_df, nu):
+    """Check what fraction of actual errors fall within predicted CI."""
+    print("\n" + "=" * 70)
+    print("CALIBRATION COVERAGE TEST  (|e - mu_pred| < t * sigma)")
+    print("=" * 70)
+    print(f"\n  {'Nominal':>10} {'mu-centred':>12} {'zero-centred':>14} {'Assessment'}")
+    print(f"  {'-'*55}")
+    has_mu = "predicted_mu" in results_df.columns
+    for level in [0.50, 0.68, 0.80, 0.90, 0.95]:
+        t_crit = stats.t.ppf((1 + level) / 2, df=nu)
+        if has_mu:
+            residual = results_df["e_overall_signed"] - results_df["predicted_mu"]
+        else:
+            residual = results_df["e_overall_signed"]
+        within_mu = (residual.abs() < t_crit * results_df["predicted_sigma"]).mean()
+        within_0  = (results_df["e_overall_signed"].abs() < t_crit * results_df["predicted_sigma"]).mean()
+        if abs(within_mu - level) < 0.05:
+            assessment = "Good"
+        elif within_mu > level:
+            assessment = "Conservative"
+        else:
+            assessment = "Under-coverage"
+        print(f"  {level:>9.0%} {within_mu:>11.0%} {within_0:>13.0%}  {assessment}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# SAVE
+# ─────────────────────────────────────────────────────────────────
+def save_results(idata, scalers, data, loo_pair=None, loo_site=None):
+    nu_samples = idata.posterior["nu"].values.flatten()
+    nu_mean = float(nu_samples.mean())
+    log_sigma0_s = idata.posterior["log_sigma0"].values.flatten()
+
+    model_params = {
+        "nu":         nu_mean,
+        "nu_std":     float(nu_samples.std()),
+        "nu_95ci":    [float(np.percentile(nu_samples, 2.5)), float(np.percentile(nu_samples, 97.5))],
+        "log_sigma0": float(log_sigma0_s.mean()),
+        "sigma0":     float(np.exp(log_sigma0_s).mean()),
+    }
+
+    if "beta_dz" in idata.posterior:
+        b = idata.posterior["beta_dz"].values.flatten()
+        model_params["beta_dz"] = float(b.mean())
+        model_params["beta_dz_std"] = float(b.std())
+        dz_std = scalers.get("dz_std", 1.0)
+        model_params["beta_dz_per_metre"] = float(b.mean() / dz_std)
+
+    gamma_posteriors = {}
+    variance_decomposition = {}
+    for gamma_name, raw_col, display in FEATURE_CONFIG:
+        if gamma_name not in idata.posterior:
+            continue
+        g = idata.posterior[gamma_name].values.flatten()
+        model_params[gamma_name] = float(g.mean())
+        gamma_posteriors[gamma_name] = {
+            "median":           float(np.median(g)),
+            "mean":             float(g.mean()),
+            "std":              float(g.std()),
+            "multiplier_at_z1": float(np.exp(g.mean())),
+            "feature":          raw_col,
+            "display_name":     display,
+        }
+        variance_decomposition[display] = float(g.mean() ** 2)
+
+    baseline_var = float(log_sigma0_s.var())
+    total_var = baseline_var + sum(variance_decomposition.values())
+    variance_decomposition["_baseline"] = baseline_var
+    variance_decomposition["_total"] = total_var
+    for k in list(variance_decomposition.keys()):
+        if not k.startswith("_"):
+            variance_decomposition[f"{k}_pct"] = float(variance_decomposition[k] / total_var * 100)
+    variance_decomposition["_baseline_pct"] = float(baseline_var / total_var * 100)
+
+    def loo_summary(results_df):
+        if results_df is None or len(results_df) < 2:
+            return None
+        r_s = results_df["predicted_sigma"].corr(results_df["actual_error"])
+        rho_s = results_df["predicted_sigma"].corr(results_df["actual_error"], method="spearman")
+        bias_s = (results_df["predicted_sigma"] - results_df["actual_error"]).mean()
+        r_e = results_df["effective_sigma"].corr(results_df["actual_error"])
+        rho_e = results_df["effective_sigma"].corr(results_df["actual_error"], method="spearman")
+        bias_e = (results_df["effective_sigma"] - results_df["actual_error"]).mean()
+        r_a = results_df["additive_sigma"].corr(results_df["actual_error"])
+        rho_a = results_df["additive_sigma"].corr(results_df["actual_error"], method="spearman")
+        bias_a = (results_df["additive_sigma"] - results_df["actual_error"]).mean()
+        return {
+            "n_pairs": len(results_df),
+            "sigma_only": {"pearson": float(r_s), "spearman": float(rho_s), "bias": float(bias_s),
+                           "mean_pred_sigma": float(results_df["predicted_sigma"].mean())},
+            "effective":  {"pearson": float(r_e), "spearman": float(rho_e), "bias": float(bias_e),
+                           "mean_pred_effective": float(results_df["effective_sigma"].mean())},
+            "additive":   {"pearson": float(r_a), "spearman": float(rho_a), "bias": float(bias_a),
+                           "mean_pred_additive": float(results_df["additive_sigma"].mean())},
+            "mean_actual_error": float(results_df["actual_error"].mean()),
+        }
+
+    results = {
+        "model_type":             "WS_pair_level",
+        "target":                 "frequency-weighted signed overall error",
+        "distribution":           "Student-t(nu, mu, sigma)",
+        "n_features":             len(FEATURE_CONFIG),
+        "dz_sat_scale":           DZ_SAT_SCALE,
+        "rough_sat_scale":        ROUGH_SAT_SCALE,
+        "turn_sat_scale":         TURN_SAT_SCALE,
+        "features":               [display for _, _, display in FEATURE_CONFIG],
+        "model_params":           model_params,
+        "gamma_posteriors":       gamma_posteriors,
+        "variance_decomposition": variance_decomposition,
+        "scalers":                {k: float(v) for k, v in scalers.items()},
+        "data_summary": {
+            "n_pairs": len(data["e"]),
+            "e_mean":  float(data["e"].mean()),
+            "e_std":   float(data["e"].std()),
+        },
+        "loo_pair": loo_summary(loo_pair),
+        "loo_site": loo_summary(loo_site),
+        "excluded_masts": EXCLUDED_MASTS,
+    }
+
+    json_path = f"{OUTPUT_PREFIX}_results.json"
+    with open(json_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Saved: {json_path}")
+
+    idata_path = f"{OUTPUT_PREFIX}_idata.nc"
+    idata.to_netcdf(idata_path)
+    print(f"Saved: {idata_path}")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────
+def main():
+    print("=" * 70)
+    print("WS UNCERTAINTY MODEL — PAIR LEVEL")
+    print("=" * 70)
+    print("\nFeatures:")
+    for i, (_, _, display) in enumerate(FEATURE_CONFIG, 1):
+        print(f"  {i}. {display}")
+
+    print("\nLoading data...")
+    df = pd.read_excel(INPUT_PATH)
+    print(f"  Raw: {len(df)} rows, {df['pair_id'].nunique()} pairs")
+
+    df = df.drop_duplicates()
+
+    df["mast_A"] = df["pair_id"].apply(lambda x: x.split("__")[0])
+    df["mast_B"] = df["pair_id"].apply(lambda x: x.split("__")[1])
+    mask = (~df["mast_A"].isin(EXCLUDED_MASTS)) & (~df["mast_B"].isin(EXCLUDED_MASTS))
+    df = df[mask].copy()
+    print(f"  After filtering: {len(df)} rows, {df['pair_id'].nunique()} pairs")
+
+    print("\nAggregating to pair level...")
+    data = build_pair_training_data(df)
+    pair_df = data["df"]
+
+    print("\nFitting full model...")
+    model, idata, scalers = fit_model(data)
+
+    print_diagnostics(idata, scalers)
+
+    print("\nRunning LOO CV (pair-level holdout)...")
+    results_df, r_pearson, r_spearman, bias = leave_one_pair_out_cv(
+        pair_df, holdout_by="pair"
+    )
+    if len(results_df) >= 2:
+        nu_mean = float(idata.posterior["nu"].values.mean())
+        calibration_coverage_test(results_df, nu_mean)
+
+    print("\nRunning LOO CV (site-level holdout)...")
+    results_df_site, *_ = leave_one_pair_out_cv(pair_df, holdout_by="site")
+    if len(results_df_site) >= 2:
+        nu_mean = float(idata.posterior["nu"].values.mean())
+        calibration_coverage_test(results_df_site, nu_mean)
+
+    save_results(idata, scalers, data, loo_pair=results_df, loo_site=results_df_site)
+
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    mp.freeze_support()
+    main()

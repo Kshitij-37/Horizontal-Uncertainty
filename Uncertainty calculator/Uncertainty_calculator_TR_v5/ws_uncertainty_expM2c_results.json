@@ -1,0 +1,147 @@
+{
+  "model_type": "WS_pair_level",
+  "variant": "exp-M2c (adaptive roughness, sigma-only, HalfStudentT)",
+  "target": "|e_overall| (absolute frequency-weighted signed overall error)",
+  "distribution": "HalfStudentT(nu, sigma)",
+  "n_features": 5,
+  "bias_term": "NONE (mu = 0 \u2014 supervisor-driven decision)",
+  "roughness_formula": "M2c: min(z(sat_A), z(sat_B)) with per-formula training z-score",
+  "dz_sat_scale": 40,
+  "rough_sat_scale": 0.01,
+  "turn_sat_scale": 3.0,
+  "features": [
+    "Saturating distance (1-exp(-d/dA))",
+    "Saturating |turning| (1-exp(-t/s))",
+    "WM |log speedup ratio|",
+    "Saturating |dz| (1-exp(-|dz|/40))",
+    "Adaptive roughness M2c: min(z(sat_A), z(sat_B))"
+  ],
+  "model_params": {
+    "nu": 14.70618144525847,
+    "nu_std": 7.639071693122049,
+    "nu_95ci": [
+      4.65483546416896,
+      33.78796136622798
+    ],
+    "log_sigma0": -3.3602220088032717,
+    "sigma0": 0.03495582226254612,
+    "gamma_dist": 0.3089049673296064,
+    "gamma_turning": 0.2792226642712646,
+    "gamma_speedup": 0.2317726051117735,
+    "gamma_dz": 0.1625267268669333,
+    "gamma_roughness": 0.34679981237743857
+  },
+  "gamma_posteriors": {
+    "gamma_dist": {
+      "median": 0.3082009945788863,
+      "mean": 0.3089049673296064,
+      "std": 0.11212105431712051,
+      "multiplier_at_z1": 1.36193293622945,
+      "feature": "dist_sat",
+      "display_name": "Saturating distance (1-exp(-d/dA))"
+    },
+    "gamma_turning": {
+      "median": 0.2778518482073569,
+      "mean": 0.2792226642712646,
+      "std": 0.12801507438744683,
+      "multiplier_at_z1": 1.3221016959081389,
+      "feature": "turning_sat",
+      "display_name": "Saturating |turning| (1-exp(-t/s))"
+    },
+    "gamma_speedup": {
+      "median": 0.2216047665544276,
+      "mean": 0.2317726051117735,
+      "std": 0.1318709737052251,
+      "multiplier_at_z1": 1.2608329892513448,
+      "feature": "wm_abs_log_speedup",
+      "display_name": "WM |log speedup ratio|"
+    },
+    "gamma_dz": {
+      "median": 0.15065925895395038,
+      "mean": 0.1625267268669333,
+      "std": 0.10247028434901799,
+      "multiplier_at_z1": 1.1764797616465388,
+      "feature": "dz_sat",
+      "display_name": "Saturating |dz| (1-exp(-|dz|/40))"
+    },
+    "gamma_roughness": {
+      "median": 0.34310731676282336,
+      "mean": 0.34679981237743857,
+      "std": 0.14317105511490866,
+      "feature": "rough_M2c",
+      "display_name": "Adaptive roughness M2c: min(z(sat_A), z(sat_B))",
+      "rough_M2c_variance_train": 0.6881528630146266
+    }
+  },
+  "variance_decomposition": {
+    "Saturating distance (1-exp(-d/dA))": 0.09542227884090518,
+    "Saturating |turning| (1-exp(-t/s))": 0.07796529624274333,
+    "WM |log speedup ratio|": 0.053718540480298095,
+    "Saturating |dz| (1-exp(-|dz|/40))": 0.026414936946078743,
+    "Adaptive roughness M2c: min(z(sat_A), z(sat_B))": 0.08276422043870174,
+    "_baseline": 0.013057762745179297,
+    "_total": 0.34934303569390635,
+    "Saturating distance (1-exp(-d/dA))_pct": 27.31477919729134,
+    "Saturating |turning| (1-exp(-t/s))_pct": 22.317690143122352,
+    "WM |log speedup ratio|_pct": 15.377017713719695,
+    "Saturating |dz| (1-exp(-|dz|/40))_pct": 7.561317744208147,
+    "Adaptive roughness M2c: min(z(sat_A), z(sat_B))_pct": 23.69138983243381,
+    "_baseline_pct": 3.7378053692246733
+  },
+  "scalers": {
+    "dist_sat_mean": 0.5109926491623917,
+    "dist_sat_std": 0.20195144855831362,
+    "turning_sat_mean": 0.18314111205462122,
+    "turning_sat_std": 0.18379411821712777,
+    "wm_abs_log_speedup_mean": 0.031513321814690805,
+    "wm_abs_log_speedup_std": 0.040303075248106376,
+    "dz_sat_mean": 0.46939414377090594,
+    "dz_sat_std": 0.324528116559587,
+    "rough_sat_A_mean": 0.35369281802571567,
+    "rough_sat_A_std": 0.2088526225611257,
+    "rough_sat_B_mean": 0.3501906339454169,
+    "rough_sat_B_std": 0.21379735236175615
+  },
+  "data_summary": {
+    "n_pairs": 47,
+    "mean_abs_e": 0.04158751747495122,
+    "std_abs_e": 0.044057041587575875,
+    "max_abs_e": 0.17997019624534774
+  },
+  "loo_pair": {
+    "n_pairs": 47,
+    "pearson": 0.8864849747017515,
+    "spearman": 0.705827937095282,
+    "bias": 0.004178787044232605,
+    "mean_pred_sigma": 0.04576630451918382,
+    "mean_actual_error": 0.041587517474951215
+  },
+  "loo_site": {
+    "n_pairs": 47,
+    "pearson": 0.8799828711996618,
+    "spearman": 0.7020120259019427,
+    "bias": 0.007293329135911336,
+    "mean_pred_sigma": 0.04888084661086254,
+    "mean_actual_error": 0.0415875174749512
+  },
+  "self_prediction": {
+    "n_masts": 42,
+    "min_pct": 0.4410902232700093,
+    "median_pct": 0.44966983992639564,
+    "max_pct": 0.44966983992639564,
+    "spread": 1.019450933627097
+  },
+  "excluded_masts": [
+    "2015WM018",
+    "2021PA004",
+    "2022PA008",
+    "2022PA018",
+    "2019HE001",
+    "2019HE002",
+    "2019HE003",
+    "2022PA021",
+    "2023PA085",
+    "2024PA014"
+  ],
+  "forest_in": true
+}

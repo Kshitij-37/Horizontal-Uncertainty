@@ -1,0 +1,18 @@
+{
+  "location": "2024PA013(A)",
+  "graph_type": "dashboard",
+  "created": "20260127_155816",
+  "data_hash": "no_data",
+  "dpi": 300,
+  "pearson_r": 0.9379505050241299,
+  "r2": 0.8285682039674948,
+  "mae": 1.0140907605142733,
+  "bias": 0.5039077140989322,
+  "device_measured": "LiDAR",
+  "device_predicted": "LiDAR",
+  "distance_m": 1213.41,
+  "dz": 64.0,
+  "trix": 70.79500000000002,
+  "energy_deviation": 0.11748804017974476,
+  "n_samples": 18356
+}

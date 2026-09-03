@@ -1,0 +1,641 @@
+================================================================================
+HORIZONTAL UNCERTAINTY MODEL - FEATURE DOCUMENTATION
+================================================================================
+
+Version: EY v6 / WS v2
+Last Updated: February 2026
+Author: Kshitij-
+
+================================================================================
+SOME THINGS YOU SHOULD KNOW
+================================================================================
+
+The T-RIX approach by FGW published in 2023 found that the best correlation between RIX as a predictor of complexity
+and the Complexity according to the survey conducted, was at 0.033. This threshold value is an "Experience based deduction".
+
+windPRO allows users to calculate T-RIX  with a threshold of 0.033.
+Sectorwise RIX calculations can only be carried out with a minimum threshold of 0.0501, which is close enough to the 0.033 value.
+
+However, this value translates to a slope angle of roughly 3 degrees.
+A 3° terrain slope is entirely within the operational envelope of WAsP, and as a result,
+RIX_0.0501 didn't seem to translate to an uncertainty predictor inside the model.
+
+WAsP PERFORMANCE ENVELOPE
+
+The operating envelope of WAsP cannot be defined quantitatively for all
+likely situations, but it is dominated by the main considerations listed
+below.
+
+Accurate predictions using the WAsP package may be obtained provided that
+both the reference and predicted sites are clearly:
+
+a. Subject to the same weather regime
+   - The maximum separation between sites is best defined by the typical
+     scale of prevailing synoptic weather systems.
+
+b. Prevailing weather conditions are close to being neutrally stable
+   - Atmospheric effects are complex and no correction is available for
+     non-neutrally stable conditions.
+   - Unstable conditions are expected to increase orographic prediction error.
+   - Stable conditions may significantly decrease the error.
+   - Coastal sites may be dominated by sea-breeze systems that do not reach
+     inland locations.
+
+c. The surrounding terrain is not too steep
+   - Orographic prediction errors are likely when surrounding slopes exceed 0.3.
+   - A slope of 0.3 is generally accepted as the upper limit to ensure
+     predominantly attached flow.
+   - Since prediction error depends on differences in site ruggedness,
+     accurate results may still be possible between two rugged but similar sites.
+   - Large-scale terrain effects such as channelling must be absent.
+   - Large differences in elevation should be treated with care.
+
+d. High quality data
+   - Measured wind speed data at the reference site must be of high quality.
+   - Preliminary data processing and sector sorting must be reliable.
+
+e. Proper use of the WAsP program
+   - Great care is required when operating outside the recommended limits.
+   - For rugged terrain, an orographic performance indicator has been
+     developed to improve interpretation of such predictions.
+
+Reference: Risø-R-995(EN)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. MODEL OVERVIEW
+2. SIGMA DRIVERS (FEATURES INCLUDED IN MODEL)
+3. FEATURES EXPLORED BUT NOT INCLUDED
+4. MODEL COMPARISON: EY vs WS
+5. INPUT DATA REQUIREMENTS
+6. GLOSSARY OF TERMS
+
+================================================================================
+1. MODEL OVERVIEW
+================================================================================
+
+Two Bayesian uncertainty models have been developed:
+
+MODEL 1: Energy Yield (EY) Uncertainty Model (v6)
+-------------------------------------------------
+Target: Energy yield deviation between cross-prediction and actual measurement
+Formula: EY_deviation = (EY_cross_predicted - EY_actual) / EY_actual
+Aggregation: Energy-weighted across 12 sectors
+
+MODEL 2: Windspeed (WS) Uncertainty Model (v2)
+----------------------------------------------
+Target: Relative windspeed deviation between cross-prediction and actual
+Formula: WS_deviation = |WS_predicted - WS_actual| / max(WS_actual, 3.0)
+Aggregation: Energy-weighted across 12 sectors (using Energy sector-wise weights of cross prediction, i.e, weight_energy_predicted)
+
+Both models have the same structure:
+- Mean model (μ): Predicts the expected deviation
+- Sigma model (σ): Predicts the uncertainty/spread of the deviation
+
+Mean Model:
+    μ = α + pair_offset + β_dz × dz
+
+    Where:
+    - α = global intercept
+    - pair_offset = random effect for each undirected pair
+    - β_dz = effect of height difference on deviation
+
+Sigma Model:
+    log(σ) = log_σ₀ + Σ(γᵢ × zᵢ)
+
+    Where:
+    - log_σ₀ = baseline log-sigma
+    - γᵢ = effect of each driver
+    - zᵢ = standardized (z-scored) driver values
+
+================================================================================
+2. SIGMA DRIVERS (FEATURES INCLUDED IN MODEL)
+================================================================================
+
+Both models include 10 sigma drivers. Each driver increases uncertainty when
+its value is high.
+
+------------------------------------------------------------------------------
+DRIVER 1: Distance Score
+------------------------------------------------------------------------------
+Column needed: distance_m, distance_A, distance_B
+Formula: dist_score = max(distance_m - distance_A, 0) / (distance_B - distance_A)
+
+Description:
+    Measures how far apart the WTG and MM are, normalized by terrain-adjusted
+    acceptable distance bounds. A score of 0 means the sites are very close
+    (within the lower bound), while higher scores indicate greater separation.
+
+Physical meaning:
+    Wind conditions decorrelate over distance. The further apart two sites are,
+    the less similar their wind climates will be, making cross-prediction
+    less reliable.
+
+Effect:
+    EY v6: Rank #7 (1.18× per +1 SD)
+    WS v2: Rank #1 (1.53× per +1 SD) ← DOMINANT for windspeed
+
+Author's notes:
+    In the old model for uncertainty, this used to be the only predictor of windspeed uncertainty.
+    The linear increase of uncertainty with distance brought about the idea of coming up with a proper analysis.
+
+From Similarity principle disproving the distance theory:
+
+In this section, some of the more typical conditions are listed.
+The list is not exhaustive — in each case, the user must determine
+which conditions are most important for the specific application.
+
+REGIONAL WIND CLIMATE
+- Similar regional wind climates (number one criterion when using WAsP)
+- Similar general atmospheric forcing effects
+- Similar atmospheric stability conditions
+
+OROGRAPHY
+- Difference in RIX less than 10 (number one criterion in complex terrain)
+- Similar slopes, exposure, and orientation of main topographical features
+- Similar site elevation above sea level
+
+ROUGHNESS
+- Similar background roughness
+- Equal orientation and distance to major roughness changes (e.g., coastlines)
+
+OBSTACLES
+- Same degree of "three-dimensionality"
+- Similar obstacle orientation
+
+OTHER SITE CHARACTERISTICS
+- Similar height above ground level of predictor (anemometer)
+  and predicted site (wind turbine hub height)
+
+NOTES ON RIX
+
+RIX (Ruggedness Index) is a coarse measure of flow separation.
+It was proposed as an indicator of terrain complexity.
+
+ΔRIX (Delta RIX) has been developed as an orographic performance indicator.
+It can predict the sign and approximate magnitude of prediction error
+when applying linear flow models such as WAsP in complex terrain.
+
+"Note, that the horizontal distance between the predictor and the predicted sites does not appear on the list
+above; one should much rather use similarity in regional wind climate."
+
+
+------------------------------------------------------------------------------
+DRIVER 2: |dz| (Absolute Height Difference)
+------------------------------------------------------------------------------
+Column needed: dz
+Formula: |dz| = absolute value of (WTG_elevation - MM_elevation)
+
+Description:
+    The magnitude of elevation difference between the WTG and MM locations,
+    regardless of which is higher. Measured in meters.
+
+Physical meaning:
+    Higher height means higher windspeed, rule of thumb is that 100 meters of elevation chnages windspeed by ~10%.
+    This alone has been the biggest mean driver for the model.
+
+
+Effect:
+    EY v6: Rank #1 (1.43× per +1 SD) ← DOMINANT for energy yield
+    WS v2: Rank #9 (1.12× per +1 SD) ← NOT SO DOMINANT, which is weird, still being looked into.
+
+------------------------------------------------------------------------------
+DRIVER 3: |log_speedup| (Speedup Difference Magnitude)
+------------------------------------------------------------------------------
+Columns needed: overall_speedup_WTG_factor, overall_speedup_MM_factor
+Formula: |log_speedup| = |log(speedup_WTG / speedup_MM)|
+
+Description:
+    The magnitude of the log-ratio between speedup factors at the WTG and MM
+    locations. Speedup factors describe how terrain affects wind speed
+    relative to a reference condition.
+
+Physical meaning:
+    Large differences in speedup factors indicate that the terrain affects
+    the two locations very differently. This makes transferring wind
+    predictions between sites more uncertain.
+
+Note on speedup factors:
+    A speedup factor > 1 means the terrain accelerates wind (e.g., hilltops)
+    A speedup factor < 1 means the terrain decelerates wind (e.g., behind hills)
+
+Why log?
+    The speedup can vary on both sides of 1, that is < 1 or > 1.
+    Moving to either side has a proportional impact on the uncertainty. And log helps me tackle this impact.
+
+Effect:
+    EY v6: Rank #2 (1.29× per +1 SD)
+    WS v2: Rank #8 (1.12× per +1 SD)
+
+------------------------------------------------------------------------------
+DRIVER 4: RIX_avg (So called Terrain Severity)
+------------------------------------------------------------------------------
+Column needed: RIX_avg_0.3_sector
+Formula: Energy-weighted average across 12 sectors
+
+Description:
+    RIX (Ruggedness Index) measures terrain complexity. The 0.3 threshold
+    identifies "severe" terrain where linear flow models may be unreliable.
+    Flow separation is obviously outside the operational envelope of WAsP.
+    RIX_avg is the average between WTG and MM locations.
+
+Physical meaning:
+    Complex terrain creates turbulent, non-linear wind flow that is harder
+    to model. Higher RIX values indicate more challenging terrain for
+    wind flow predictions.
+
+Values:
+    RIX = 0-5%: Generally flat or gentle terrain
+    RIX = 5-15%: Moderately complex terrain
+    RIX > 15%: Very complex terrain (wind flow models may be unreliable)
+
+Effect:
+    EY v6: Rank #6 (1.22× per +1 SD)
+    WS v2: Rank #10 (1.12× per +1 SD)
+
+
+Author's note:
+
+I also tried with RIX_avg_0.0501_sector, but the results weren't encouraging.
+
+------------------------------------------------------------------------------
+DRIVER 5: Severity Fraction - Artificial parameter created by Kshitij-
+------------------------------------------------------------------------------
+Columns needed: dRIX_0.3_sector, dRIX_0.0501_sector
+Formula: severity_fraction = |dRIX_0.3| / (|dRIX_0.3| + |dRIX_mild| + ε)
+         where dRIX_mild = dRIX_0.0501 - dRIX_0.3
+
+Description:
+    Measures what fraction of the total terrain difference between WTG and MM
+    is in "severe" terrain (RIX threshold 0.3) versus "mild" terrain.
+
+Physical meaning:
+    If terrain differences are concentrated in severe terrain (steep slopes,
+    cliffs), the uncertainty is higher than if the same total difference
+    were in milder terrain.
+
+Values:
+    0 = All terrain difference is in mild terrain
+    1 = All terrain difference is in severe terrain
+
+Effect:
+    EY v6: Rank #4 (1.24× per +1 SD)
+    WS v2: Rank #7 (1.14× per +1 SD)
+
+----------------------------------------------------------------------------------------------
+DRIVER 6: Flip × Gradient (Deflection Effect) - Artificial parameter created by Kshitij-
+----------------------------------------------------------------------------------------------
+Columns needed: d_turning_deg, flip_fraction_weighted_by_predicted_power,
+                overall_speedup_WTG_factor (for all 12 sectors)
+Formula: flip_x_gradient = flip_fraction × |log(speedup_current) - log(speedup_adjacent)|
+
+Description:
+    Combines the "flip fraction" (energy borrowed from adjacent sectors due to
+    wind deflection) with the speedup gradient between sectors. This captures
+    cases where wind deflection causes energy to shift between sectors with
+    very different speedup characteristics.
+
+Physical meaning:
+    When wind is deflected from one sector to another, and those sectors have
+    very different terrain effects (speedup gradient), the prediction becomes
+    more uncertain. The model can't accurately track where the energy "should"
+    be attributed.
+
+Effect:
+    EY v6: Rank #5 (1.23× per +1 SD)
+    WS v2: Rank #2 (1.25× per +1 SD)
+
+------------------------------------------------------------------------------
+DRIVER 7: Sample Shortfall (Campaign Length)
+------------------------------------------------------------------------------
+Column needed: Sample_count_pred
+Formula: sample_shortfall = log(max_samples_in_training) - log(pair_total_samples)
+
+Description:
+    Measures how much shorter the measurement campaign is compared to the
+    longest campaign in the training data. Higher shortfall = shorter campaign.
+
+Physical meaning:
+    Shorter measurement campaigns capture less of the natural wind variability.
+    The mean windspeed estimate is less stable, leading to higher uncertainty.
+
+Note:
+    This is "epistemic" uncertainty - it can be reduced by collecting more data.
+    At deployment, if 1 year of data is available, sample_shortfall can be
+    set to 0.
+
+Effect:
+    EY v6: Rank #3 (1.25× per +1 SD)
+    WS v2: Rank #4 (1.17× per +1 SD)
+
+---------------------------------------------------------------------------------------------
+DRIVER 8: Concentration Ratio (Energy Distribution) - Artificial parameter created by Kshitij-
+---------------------------------------------------------------------------------------------
+Column needed: weight_energy_predicted
+Formula:
+    effective_sectors = 1 / Σ(weight²)  [Inverse Herfindahl-Hirschman Index]
+    concentration_ratio = (12 - effective_sectors) / 11
+
+Description:
+    Measures how concentrated the energy production is across sectors.
+    If most energy comes from 2-3 sectors, the ratio is high. If energy
+    is evenly distributed, the ratio is low.
+
+Physical meaning:
+    When energy is concentrated in few sectors, prediction errors in those
+    sectors dominate the total. There's less "averaging out" of errors
+    across directions.
+
+Values:
+    0 = Perfectly even distribution (1/12 = 8.3% per sector)
+    1 = All energy from one sector
+    Typical range: 0.2 - 0.8
+
+Effect:
+    EY v6: Rank #10 (1.15× per +1 SD)
+    WS v2: Rank #5 (1.16× per +1 SD)
+
+------------------------------------------------------------------------------
+DRIVER 9: Turning Std (Deflection Variability)
+------------------------------------------------------------------------------
+Column needed: d_turning_deg
+Formula: turning_std = std(|d_turning_deg|) across 12 sectors
+
+Description:
+    Standard deviation of the absolute turning angle across all sectors.
+    High values indicate that wind deflection varies greatly depending on
+    wind direction.
+
+Physical meaning:
+    Variable deflection patterns indicate complex, direction-dependent terrain
+    effects. The wind flow responds very differently depending on where it
+    comes from, making predictions harder.
+
+Effect:
+    EY v6: Rank #8 (1.16× per +1 SD)
+    WS v2: Rank #6 (1.15× per +1 SD)
+
+------------------------------------------------------------------------------
+DRIVER 10: Speedup Diff Std (Speedup Relationship Variability)
+------------------------------------------------------------------------------
+Columns needed: overall_speedup_WTG_factor, overall_speedup_MM_factor
+Formula: speedup_diff_std = std(speedup_MM - speedup_WTG) across 12 sectors
+
+Description:
+    Standard deviation of the speedup difference (MM minus WTG) across all
+    sectors. High values indicate an inconsistent relationship between the
+    two sites.
+
+Physical meaning:
+    If the speedup difference varies greatly by direction, the terrain
+    relationship between sites is complex. In some directions, WTG might
+    be in faster wind; in others, MM might be faster. This inconsistency
+    makes cross-prediction harder.
+
+Note:
+    If the difference changes sign across sectors (sometimes positive,
+    sometimes negative), this indicates particularly complex terrain.
+
+Effect:
+    EY v6: Rank #9 (1.15× per +1 SD)
+    WS v2: Rank #3 (1.17× per +1 SD)
+
+================================================================================
+3. FEATURES EXPLORED BUT NOT INCLUDED
+================================================================================
+
+The following features were tested during model development but were not
+included in the final models:
+
+------------------------------------------------------------------------------
+FEATURE: Roughness Changes (roughness_ch_avg)
+------------------------------------------------------------------------------
+What it measures:
+    Number of land cover transitions (e.g., forest→water) within 10km radius,
+    averaged between WTG and MM locations.
+
+Hypothesis:
+    More roughness changes → internal boundary layers → harder to model
+
+Exploration result:
+    Paradoxical negative correlation at sector level (r = -0.08 with |EY|)
+    Weak positive correlation at pair level (r = +0.26 with |EY|)
+    Confounded with |dz| (r = +0.42)
+
+Decision: NOT INCLUDED
+    The signal was weak and in unexpected direction. May be capturing
+    something else (e.g., flat terrain with many roughness changes vs
+    complex terrain with few).
+
+------------------------------------------------------------------------------
+FEATURE: Windspeed Sensitivity (Power Curve Slope)
+------------------------------------------------------------------------------
+What it measures:
+    Slope of the power curve at the mean windspeed (dP/dWS).
+    Higher slope = small windspeed error → large power error.
+
+Hypothesis:
+    Steeper power curve regions should amplify windspeed errors into
+    larger energy yield errors.
+
+Exploration result:
+    Negative correlation (r = -0.02 with |EY|) - opposite to hypothesis!
+
+Explanation:
+    High-slope regions (7-10 m/s) are actually the core operating range
+    where the power curve is best calibrated. The negative correlation
+    reflects model calibration quality, not physical amplification.
+
+Decision: NOT INCLUDED
+    The hypothesis was logical but empirically not supported.
+
+------------------------------------------------------------------------------
+FEATURE: dz × Distance Interaction
+------------------------------------------------------------------------------
+What it measures:
+    |dz| × distance_score
+
+Hypothesis:
+    Height errors might compound over distance. A 50m height difference
+    at 500m distance is different from 50m at 5000m distance.
+
+Exploration result:
+    r = +0.16 with |EY|, r = +0.33 with |WS|
+
+Decision: NOT INCLUDED
+    Almost perfectly redundant with distance_score alone (r = 0.97).
+    Distance already captures this effect.
+
+------------------------------------------------------------------------------
+FEATURE: Location Exclusions
+------------------------------------------------------------------------------
+What it measures:
+    Testing whether excluding specific "problematic" locations improves
+    model fit.
+
+    The idea here was: According to the EY deviation vs. TRIX graph, the clear outliers were Herzhausen, Ukhanda and Sallachy.
+    So, an attempt to get better fit through ommission of these 3 projects was tried.
+
+Locations tested:
+    Sallachy (8 pairs), Herzhausen (3 pairs), Ukhanda (4 pairs)
+
+Result:
+    Excluding these locations made the model WORSE (R² dropped from 0.46 to 0.40).
+    The "problematic" locations actually followed the physics better than average.
+
+Decision: NOT IMPLEMENTED
+    No locations are excluded from training data.
+
+------------------------------------------------------------------------------
+FEATURE: Reference Roughness Length
+------------------------------------------------------------------------------
+What it measures:
+    The "distant terrain roughness" used as basis for speedup calculations
+    in WAsP.
+
+Hypothesis:
+    Might capture additional terrain information.
+
+Assessment:
+    Likely redundant with speedup factors, which already incorporate
+    roughness effects in their calculation.
+
+Decision: NOT EXPLORED
+    Deferred due to likely redundancy.
+
+------------------------------------------------------------------------------
+FEATURE: Steep Region Exposure (7-9 m/s)
+------------------------------------------------------------------------------
+What it measures:
+    Fraction of energy coming from sectors where Mean_windspeed_predicted
+    falls within the steep power curve region (7-9 m/s).
+
+Hypothesis:
+    Energy production in steep power curve regions should amplify windspeed
+    errors into larger energy yield errors.
+
+Exploration result:
+    Negative correlation with |EY| - opposite to hypothesis.
+    Tested multiple formulations: steep_fraction, weighted_proximity,
+    distance_from_steep. All showed weak or negative correlations.
+
+Explanation:
+    Sites with ~8 m/s mean wind are often well-sited with good measurement
+    campaigns. The amplification effect, if real, is likely dwarfed by
+    terrain effects (|dz|, distance, speedup differences).
+
+Decision: NOT INCLUDED
+    Tested twice with different approaches. Effect not empirically supported.
+
+
+================================================================================
+4. MODEL COMPARISON: EY vs WS
+================================================================================
+
+The two models show fundamentally different driver rankings:
+
+ENERGY YIELD MODEL (v6)                    WINDSPEED MODEL (v2)
+------------------------------------------------------------------------------
+Rank  Driver              Multiplier       Rank  Driver              Multiplier
+------------------------------------------------------------------------------
+1     |dz|                1.43×            1     Distance            1.53×
+2     |log_speedup|       1.29×            2     Flip × Gradient     1.25×
+3     Sample Shortfall    1.25×            3     Speedup Diff Std    1.17×
+4     Severity fraction   1.24×            4     Sample Shortfall    1.17×
+5     Flip × Gradient     1.23×            5     Concentration       1.16×
+6     RIX_avg             1.22×            6     Turning Std         1.15×
+7     Distance            1.18×            7     Severity fraction   1.14×
+8     Turning Std         1.16×            8     |log_speedup|       1.12×
+9     Speedup Diff Std    1.15×            9     |dz|                1.12×
+10    Concentration       1.15×            10    RIX_avg             1.12×
+
+KEY INSIGHT:
+- EY uncertainty is dominated by HEIGHT DIFFERENCE (|dz| is #1)
+  → Power curve amplification: same WS error → different power error at
+    different heights
+
+- WS uncertainty is dominated by DISTANCE (#1)
+  → Wind field decorrelation: further apart → less similar wind conditions
+
+These are measuring different types of prediction error:
+- EY captures total energy across all timestamps (cumulative)
+- WS captures mean windspeed error (representative value)
+
+================================================================================
+5. INPUT DATA REQUIREMENTS
+================================================================================
+
+For each pair to be evaluated, provide 12 rows (one per sector) with:
+
+PAIR-LEVEL COLUMNS (same value across all 12 rows):
+- pair_id: Unique identifier (e.g., "SiteA__SiteB")
+- dz: Height difference in meters (WTG - MM)
+- distance_m: Distance between sites in meters
+- distance_A: Lower acceptable distance bound
+- distance_B: Upper acceptable distance bound
+
+SECTOR-LEVEL COLUMNS (vary by sector):
+- sector_name: N, NNE, ENE, E, ESE, SSE, S, SSW, WSW, W, WNW, NNW
+- overall_speedup_WTG_factor: Speedup at WTG location
+- overall_speedup_MM_factor: Speedup at MM location
+- RIX_avg_0.3_sector: Average terrain severity
+- dRIX_0.3_sector: Severe terrain difference
+- dRIX_0.0501_sector: Total terrain difference
+- d_turning_deg: Wind deflection angle
+- flip_fraction_weighted_by_predicted_power: Energy flip fraction
+- weight_energy_predicted: Energy weight (MUST SUM TO 1.0)
+- Sample_count_pred: Sample count per sector
+
+See uncertainty_input_template.xlsx for example format.
+
+================================================================================
+6. GLOSSARY OF TERMS
+================================================================================
+
+Cross-prediction:
+    Predicting wind conditions at one location (WTG) using measurements
+    from another location (MM), adjusted for terrain differences.
+
+dz:
+    Height difference between WTG and MM. Positive = WTG is higher.
+
+Energy weight:
+    Fraction of total energy production attributed to each sector.
+    Based on wind frequency and windspeed (power ~ v³).
+
+Flip fraction:
+    When wind is deflected (turning), energy "flips" from one sector to
+    another. This fraction measures how much energy is "borrowed" from
+    adjacent sectors.
+
+MM (Measurement Mast):
+    The far away location where wind is measured and cross predicted from.
+
+Power curve:
+    The relationship between windspeed and power output for a turbine.
+    Non-linear: very steep between 7-12 m/s, flat above rated speed.
+
+RIX (Ruggedness Index):
+    Percentage of terrain within a radius that exceeds a slope threshold.
+    RIX_0.3 uses 30% slope (~17°), considered "severe" terrain.
+
+Sector:
+    One of 12 wind directions, each spanning 30° of the compass, the angles are centered, example: Sector N is from 345° to 15°, with its center at 0°.
+    Pls remember that the speedup and the deflection is calculated for the center of the sector.
+
+Speedup factor:
+    How terrain affects wind speed compared to a reference condition.
+    >1 = acceleration (hilltops), <1 = deceleration (valleys).
+
+WAsP:
+    Wind Atlas Analysis and Application Program - industry-standard
+    software for wind resource assessment.
+
+WTG (Wind Turbine Generator):
+    The location where wind conditions are being predicted and where the True measurement is.
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================

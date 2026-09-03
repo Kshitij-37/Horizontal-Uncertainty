@@ -1,0 +1,41 @@
+{
+  "config": "exp-A__forest-in",
+  "form": "exp-A",
+  "forest_config": "forest-in",
+  "n_pairs": 45,
+  "loo": {
+    "pearson": 0.8822964703546367,
+    "spearman": 0.6447957839262187,
+    "bias": 0.00636799530154396
+  },
+  "coeffs": {
+    "log_sigma0": -5.599423537669636,
+    "betas": {
+      "dist_sat": 0.36279678086981365,
+      "turning_sat": 0.3212853900488492,
+      "wm_abs_log_speedup": 0.21797889123085537,
+      "roughness_sat": 0.29889902897015047,
+      "dz_sat": 0.16802437691014274
+    },
+    "nu": 14.763636453776096
+  },
+  "feature_order": [
+    "dist_sat",
+    "turning_sat",
+    "wm_abs_log_speedup",
+    "roughness_sat",
+    "dz_sat"
+  ],
+  "feature_stds": {
+    "dist_sat": 0.19617068028058277,
+    "turning_sat": 0.1839789457731056,
+    "wm_abs_log_speedup": 0.0405641094425912,
+    "roughness_sat": 0.21074537283688846,
+    "dz_sat": 0.31805323038601974
+  },
+  "self_prediction_range_pct": {
+    "min": 0.36999960101527446,
+    "median": 0.6588935241240265,
+    "max": 1.2743775799294061
+  }
+}

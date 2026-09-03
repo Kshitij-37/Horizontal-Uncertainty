@@ -1,0 +1,41 @@
+{
+  "config": "exp-M__forest-out",
+  "form": "exp-M",
+  "forest_config": "forest-out",
+  "n_pairs": 41,
+  "loo": {
+    "pearson": 0.901236589649583,
+    "spearman": 0.772473867595819,
+    "bias": 0.005730262706004164
+  },
+  "coeffs": {
+    "log_sigma0": -5.363804554018256,
+    "betas": {
+      "dist_sat": 0.24930030064315004,
+      "turning_sat": 0.2822448377534353,
+      "wm_abs_log_speedup": 0.19799441227741954,
+      "roughness_sat": 0.3904409943934174,
+      "dz_sat": 0.14786868764182476
+    },
+    "nu": 14.957862788320861
+  },
+  "feature_order": [
+    "dist_sat",
+    "turning_sat",
+    "wm_abs_log_speedup",
+    "roughness_sat",
+    "dz_sat"
+  ],
+  "feature_stds": {
+    "dist_sat": 0.20018732804472186,
+    "turning_sat": 0.19247396001992678,
+    "wm_abs_log_speedup": 0.042142539368597264,
+    "roughness_sat": 0.15759331573562907,
+    "dz_sat": 0.32212845278326147
+  },
+  "self_prediction_range_pct": {
+    "min": 0.46830552351984184,
+    "median": 0.46830552351984184,
+    "max": 0.46830552351984184
+  }
+}

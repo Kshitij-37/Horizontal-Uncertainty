@@ -1,0 +1,8 @@
+{
+    "projects_root": "C:/YourPath/Projects",
+    "input_data_dir": "C:/YourPath/InputData",
+    "output_dir": "C:/YourPath/Output",
+    "directional_analysis_dir": "C:/YourPath/DirectionalAnalysis",
+    "images_dir": "C:/YourPath/Images",
+    "fallback_folder": ""
+}
