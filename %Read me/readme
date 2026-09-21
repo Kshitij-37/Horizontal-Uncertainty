@@ -1,8 +1,0 @@
-The order in which the files needs to be executed is mentioned here:
-
-1. Timeseries analysis: It analyses all the measurement pairs and provide a summary of all the measurements, alongwith providing a single excel sheet with all the necessary info.
-This sheet relies on Device data input.
-
-2. Directional analysis needs to be run, this and the timeseries analysis scripts are independent of each other.
-
-3.

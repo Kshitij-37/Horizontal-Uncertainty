@@ -1,7 +1,0 @@
-variant,pearson,spearman,bias,n_pairs,weight_mode,dist_mode,speedup_mode,roughness_mode
-"BASELINE (freq_MM, saturating, overall, average)",0.9264434601292988,0.7461429040376409,-0.009842315563597843,38,freq_MM,saturating,overall,average
-weight: energy,0.9242530011896141,0.763431447641974,-0.01007035006205943,38,energy,saturating,overall,average
-weight: sample_pred,0.9298455672247528,0.7413283729073202,-0.009854185903159406,38,sample_pred,saturating,overall,average
-distance: linear dist_score,0.9190509392011479,0.7172557172557172,-0.008328906870146924,38,freq_MM,linear,overall,average
-speedup: orographic only,0.9286628316744682,0.7454863770653244,-0.009951625200592293,38,freq_MM,saturating,orographic,average
-roughness: dissimilarity,0.8581988910767462,0.6165882481671956,-0.010160827235277017,38,freq_MM,saturating,overall,dissimilarity
